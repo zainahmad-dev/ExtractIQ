@@ -1,10 +1,13 @@
 import { createWorker, type Worker } from 'tesseract.js';
 import { PDFParse } from 'pdf-parse';
+import { withRetry, handleRetryExhaustion } from '@/lib/validation/retry';
 import { preprocessImage, type PreprocessOptions } from './preprocess';
 
 const OCR_LANGUAGE = 'eng';
 /** Render PDF pages at 2x so small print survives rasterisation. */
 const PDF_RENDER_SCALE = 2;
+/** Below this, OCR output is treated as a failed attempt worth retrying. */
+const MIN_ACCEPTABLE_WORD_COUNT = 2;
 
 export interface OcrPageResult {
   pageNumber: number;
@@ -162,4 +165,75 @@ export async function extractTextFromPdf(
     pages,
     appliedSteps,
   };
+}
+
+/**
+ * extractTextFromImage, retried once on near-empty output. On exhaustion,
+ * records documents.status = 'needs_manual_entry' + error_reason directly
+ * (Phase 18 formalizes this through the shared state machine) and returns
+ * the last attempt's result so the caller still has whatever text, if any,
+ * was recovered.
+ */
+export async function extractTextFromImageWithRetry(
+  documentId: string,
+  image: Buffer,
+  options: PreprocessOptions = {}
+): Promise<OcrResult> {
+  let lastResult: OcrResult | undefined;
+
+  try {
+    return await withRetry(
+      async () => {
+        const result = await extractTextFromImage(image, options);
+        lastResult = result;
+        if (result.wordCount < MIN_ACCEPTABLE_WORD_COUNT) {
+          throw new Error(
+            `OCR produced near-empty output (${result.wordCount} word(s) recognized)`
+          );
+        }
+        return result;
+      },
+      { retries: 1 }
+    );
+  } catch {
+    await handleRetryExhaustion(
+      documentId,
+      `OCR produced near-empty output after retry (${lastResult?.wordCount ?? 0} word(s) recognized)`
+    );
+    return lastResult!;
+  }
+}
+
+/**
+ * extractTextFromPdf, retried once on near-empty output. Same exhaustion
+ * handling as extractTextFromImageWithRetry.
+ */
+export async function extractTextFromPdfWithRetry(
+  documentId: string,
+  pdf: Buffer,
+  options: PreprocessOptions = {}
+): Promise<OcrResult> {
+  let lastResult: OcrResult | undefined;
+
+  try {
+    return await withRetry(
+      async () => {
+        const result = await extractTextFromPdf(pdf, options);
+        lastResult = result;
+        if (result.wordCount < MIN_ACCEPTABLE_WORD_COUNT) {
+          throw new Error(
+            `OCR produced near-empty output (${result.wordCount} word(s) recognized)`
+          );
+        }
+        return result;
+      },
+      { retries: 1 }
+    );
+  } catch {
+    await handleRetryExhaustion(
+      documentId,
+      `OCR produced near-empty output after retry (${lastResult?.wordCount ?? 0} word(s) recognized)`
+    );
+    return lastResult!;
+  }
 }
