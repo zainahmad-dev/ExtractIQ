@@ -19,6 +19,7 @@ export interface Database {
   public: {
     Tables: {
       documents: {
+        Relationships: [];
         Row: {
           id: string;
           filename: string;
@@ -48,6 +49,7 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['documents']['Insert']>;
       };
       document_extractions: {
+        Relationships: [];
         Row: {
           id: string;
           document_id: string;
@@ -95,6 +97,7 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['document_extractions']['Insert']>;
       };
       line_items: {
+        Relationships: [];
         Row: {
           id: string;
           draft_id: string;
@@ -116,6 +119,7 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['line_items']['Insert']>;
       };
       exports: {
+        Relationships: [];
         Row: {
           id: string;
           format: string;
@@ -133,6 +137,7 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['exports']['Insert']>;
       };
       processing_logs: {
+        Relationships: [];
         Row: {
           id: string;
           document_id: string;
@@ -154,6 +159,8 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['processing_logs']['Insert']>;
       };
     };
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
   };
 }
 
