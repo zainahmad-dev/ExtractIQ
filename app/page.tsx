@@ -1,7 +1,7 @@
-export default function Home() {
+export default function LandingPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <h1 className="text-xl font-semibold">Structured Data Extraction Pipeline</h1>
+    <div className="p-6">
+      <h1 className="text-2xl font-semibold">Landing</h1>
     </div>
   );
 }
