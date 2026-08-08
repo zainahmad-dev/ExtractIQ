@@ -3,6 +3,7 @@ import { isDocumentStatus, type DocumentStatus } from '@/types/status';
 import { extractPdfText } from '@/lib/pdf/extract';
 import { extractTextFromImageWithRetry, extractTextFromPdfWithRetry } from '@/lib/ocr/extract';
 import { structureDocumentWithRetry } from '@/lib/ollama/structure';
+import { logStep } from '@/lib/logger/processing';
 
 export class DocumentNotFoundError extends Error {
   constructor(documentId: string) {
@@ -82,27 +83,6 @@ async function checkForExternalFailure(
     return { failed: true, history: nextHistory };
   }
   return { failed: false };
-}
-
-async function logStep(
-  documentId: string,
-  step: string,
-  status: 'success' | 'failed',
-  durationMs: number,
-  message?: string
-): Promise<void> {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase.from('processing_logs').insert({
-    document_id: documentId,
-    step,
-    status,
-    duration_ms: Math.round(durationMs),
-    message,
-  });
-
-  if (error) {
-    console.error(`Failed to write processing log (document ${documentId}, step ${step}):`, error.message);
-  }
 }
 
 /**
