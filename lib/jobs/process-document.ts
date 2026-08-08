@@ -4,6 +4,69 @@ import { extractPdfText } from '@/lib/pdf/extract';
 import { extractTextFromImageWithRetry, extractTextFromPdfWithRetry } from '@/lib/ocr/extract';
 import { structureDocumentWithRetry } from '@/lib/ollama/structure';
 import { logStep } from '@/lib/logger/processing';
+import { runArithmeticChecks } from '@/lib/validation/arithmetic';
+import { score } from '@/lib/confidence/score';
+import { scoreProcessing } from '@/lib/confidence/processing-score';
+import {
+  claimTransition,
+  transitionStatus,
+  type StatusHistoryEntry,
+} from '@/lib/validation/state-machine';
+import type { ExtractedDocument } from '@/types/document';
+
+/** No OCR runs for a digital PDF, so it gets a fixed high baseline rather than a null. */
+const DIGITAL_PDF_OCR_QUALITY_BASELINE = 98;
+
+/** document_extractions columns Phase 16's confidence algorithm will score. */
+const REQUIRED_FIELD_KEYS = [
+  'vendor_name',
+  'document_number',
+  'document_date',
+  'currency',
+  'subtotal_amount',
+  'tax_amount',
+  'total_amount',
+  'line_items',
+] as const;
+
+function isPresent(value: string | number | null): boolean {
+  if (value === null) return false;
+  return typeof value === 'string' ? value.trim().length > 0 : true;
+}
+
+/**
+ * The model returns no native per-field confidence, so field_confidence here
+ * is a presence signal (100 if the field came back non-null/non-empty, 0 if
+ * not) — the baseline Phase 16 will later multiply by an OCR-quality factor
+ * and cap against Phase 14's arithmetic checks. missing_fields lists the same
+ * absent fields by their document_extractions column name.
+ */
+function collectConfidenceSignals(data: ExtractedDocument): {
+  fieldConfidence: Record<string, number>;
+  missingFields: string[];
+} {
+  const presence: Record<(typeof REQUIRED_FIELD_KEYS)[number], boolean> = {
+    vendor_name: isPresent(data.vendorName),
+    document_number: isPresent(data.documentNumber),
+    document_date: isPresent(data.documentDate),
+    currency: isPresent(data.currency),
+    subtotal_amount: isPresent(data.subtotal),
+    tax_amount: isPresent(data.tax),
+    total_amount: isPresent(data.total),
+    line_items: data.lineItems.length > 0,
+  };
+
+  const fieldConfidence: Record<string, number> = {};
+  const missingFields: string[] = [];
+
+  for (const key of REQUIRED_FIELD_KEYS) {
+    const present = presence[key];
+    fieldConfidence[key] = present ? 100 : 0;
+    if (!present) missingFields.push(key);
+  }
+
+  return { fieldConfidence, missingFields };
+}
 
 export class DocumentNotFoundError extends Error {
   constructor(documentId: string) {
@@ -17,12 +80,6 @@ export interface ProcessDocumentResult {
   status: DocumentStatus;
 }
 
-interface StatusHistoryEntry {
-  status: string;
-  at: string;
-  message?: string;
-}
-
 function readStatus(documentId: string, status: string): DocumentStatus {
   if (!isDocumentStatus(status)) {
     throw new Error(`Document ${documentId} has an unrecognized status: ${status}`);
@@ -30,57 +87,35 @@ function readStatus(documentId: string, status: string): DocumentStatus {
   return status;
 }
 
-/** Appends one status_history entry and writes status (+ error_reason, for failures) in one update. */
-async function transition(
-  documentId: string,
-  history: StatusHistoryEntry[],
-  status: DocumentStatus,
-  message?: string
-): Promise<StatusHistoryEntry[]> {
-  const supabase = getSupabaseAdminClient();
-  const nextHistory = [...history, { status, at: new Date().toISOString(), ...(message ? { message } : {}) }];
-
-  const { error } = await supabase
-    .from('documents')
-    .update({
-      status,
-      status_history: nextHistory,
-      ...(status === 'needs_manual_entry' && message ? { error_reason: message } : {}),
-    })
-    .eq('id', documentId);
-
-  if (error) {
-    throw new Error(`Failed to update document ${documentId} to status ${status}: ${error.message}`);
-  }
-  return nextHistory;
-}
-
 /**
- * lib/ocr/extract.ts's *WithRetry helpers never throw — on exhaustion they call
- * lib/validation/retry.ts's handleRetryExhaustion (which sets status +
- * error_reason directly) and return their last attempt's result regardless.
- * Since that write bypasses this file's status_history bookkeeping, this
- * re-reads the row after every such call to detect it and append the missing
- * history entry before the pipeline stops.
+ * lib/ocr/extract.ts's and lib/ollama/structure.ts's *WithRetry helpers never
+ * throw — on exhaustion they call lib/validation/retry.ts's
+ * handleRetryExhaustion, which (as of Phase 18) already writes both status
+ * and status_history via the shared state machine. This just re-reads the
+ * row to detect that it happened and resync this function's local
+ * status/history with what was written, before the pipeline stops.
  */
 async function checkForExternalFailure(
-  documentId: string,
-  history: StatusHistoryEntry[]
-): Promise<{ failed: false } | { failed: true; history: StatusHistoryEntry[] }> {
+  documentId: string
+): Promise<
+  { failed: false } | { failed: true; status: DocumentStatus; history: StatusHistoryEntry[] }
+> {
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('documents')
-    .select('status, error_reason')
+    .select('status, status_history')
     .eq('id', documentId)
     .single();
 
   if (error || !data) {
-    throw new Error(`Failed to re-check status for document ${documentId}: ${error?.message ?? 'not found'}`);
+    throw new Error(
+      `Failed to re-check status for document ${documentId}: ${error?.message ?? 'not found'}`
+    );
   }
 
-  if (readStatus(documentId, data.status) === 'needs_manual_entry') {
-    const nextHistory = await transition(documentId, history, 'needs_manual_entry', data.error_reason ?? undefined);
-    return { failed: true, history: nextHistory };
+  const status = readStatus(documentId, data.status);
+  if (status === 'needs_manual_entry') {
+    return { failed: true, status, history: data.status_history };
   }
   return { failed: false };
 }
@@ -89,8 +124,11 @@ async function checkForExternalFailure(
  * Sequences a queued document through extraction, structuring, and draft
  * creation: Phase 7 (PDF text) -> Phase 8 OCR (if flagged, or always for
  * image uploads) -> Phase 10 LLM structuring, each guarded by Phase 11's
- * retry wrapper -> insert document_extractions (+ line_items). Confidence
- * fields are intentionally left null; Phases 14-17 populate them later.
+ * retry wrapper -> insert document_extractions (+ line_items), including
+ * Phase 15's four raw confidence signals combined by Phase 16's score() into
+ * field_confidence/overall_confidence. A finally block scores pipeline
+ * execution health via Phase 17's scoreProcessing() and persists it to
+ * documents.processing_confidence regardless of how the run ends.
  *
  * Idempotent: only a document in 'queued' status is claimed and run. The
  * claim is a conditional update (status='queued' in the WHERE clause) so two
@@ -115,24 +153,15 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
     return { id: documentId, status: initialStatus };
   }
 
-  const claimHistory: StatusHistoryEntry[] = [
-    ...document.status_history,
-    { status: 'processing', at: new Date().toISOString(), message: 'Claimed for processing' },
-  ];
+  const claimedHistory = await claimTransition(
+    documentId,
+    'queued',
+    'processing',
+    document.status_history,
+    'Claimed for processing'
+  );
 
-  const { data: claimed, error: claimError } = await supabase
-    .from('documents')
-    .update({ status: 'processing', status_history: claimHistory })
-    .eq('id', documentId)
-    .eq('status', 'queued')
-    .select()
-    .maybeSingle();
-
-  if (claimError) {
-    throw new Error(`Failed to claim document ${documentId}: ${claimError.message}`);
-  }
-
-  if (!claimed) {
+  if (!claimedHistory) {
     const { data: latest, error: latestError } = await supabase
       .from('documents')
       .select('status')
@@ -144,7 +173,14 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
     return { id: documentId, status: readStatus(documentId, latest.status) };
   }
 
-  let history: StatusHistoryEntry[] = claimed.status_history;
+  let currentStatus: DocumentStatus = 'processing';
+  let history: StatusHistoryEntry[] = claimedHistory;
+
+  /** Validates + writes the next transition, then advances the tracked local state to match. */
+  async function advance(to: DocumentStatus, message?: string): Promise<void> {
+    history = await transitionStatus(documentId, currentStatus, to, history, message);
+    currentStatus = to;
+  }
 
   try {
     const downloadStart = Date.now();
@@ -153,10 +189,14 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
       .download(document.file_path);
 
     if (downloadError || !fileBlob) {
-      await logStep(documentId, 'download_source', 'failed', Date.now() - downloadStart, downloadError?.message);
-      await transition(
+      await logStep(
         documentId,
-        history,
+        'download_source',
+        'failed',
+        Date.now() - downloadStart,
+        downloadError?.message
+      );
+      await advance(
         'needs_manual_entry',
         `Failed to download source file: ${downloadError?.message ?? 'unknown error'}`
       );
@@ -166,9 +206,10 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
     const buffer = Buffer.from(await fileBlob.arrayBuffer());
 
     let rawText: string;
+    let ocrQualityScore: number;
 
     if (document.mime_type === 'application/pdf') {
-      history = await transition(documentId, history, 'extracting_text', 'Extracting text from PDF');
+      await advance('extracting_text', 'Extracting text from PDF');
 
       const pdfStart = Date.now();
       const pdfResult = await extractPdfText(buffer);
@@ -181,50 +222,62 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
       );
 
       if (pdfResult.requiresOcr) {
-        history = await transition(
-          documentId,
-          history,
+        await advance(
           'running_ocr',
           `PDF text quality score ${pdfResult.qualityScore.toFixed(1)} is below threshold — running OCR`
         );
 
         const ocrStart = Date.now();
         const ocrResult = await extractTextFromPdfWithRetry(documentId, buffer);
-        await logStep(documentId, 'ocr', 'success', Date.now() - ocrStart, `wordCount=${ocrResult.wordCount}`);
+        await logStep(
+          documentId,
+          'ocr',
+          'success',
+          Date.now() - ocrStart,
+          `wordCount=${ocrResult.wordCount}`
+        );
 
-        const failureCheck = await checkForExternalFailure(documentId, history);
+        const failureCheck = await checkForExternalFailure(documentId);
         if (failureCheck.failed) {
+          currentStatus = failureCheck.status;
+          history = failureCheck.history;
           return { id: documentId, status: 'needs_manual_entry' };
         }
         rawText = ocrResult.text;
+        ocrQualityScore = ocrResult.ocrQualityScore;
       } else {
         rawText = pdfResult.text;
+        ocrQualityScore = DIGITAL_PDF_OCR_QUALITY_BASELINE;
       }
     } else {
-      history = await transition(documentId, history, 'running_ocr', 'Running OCR on image upload');
+      await advance('running_ocr', 'Running OCR on image upload');
 
       const ocrStart = Date.now();
       const ocrResult = await extractTextFromImageWithRetry(documentId, buffer);
-      await logStep(documentId, 'ocr', 'success', Date.now() - ocrStart, `wordCount=${ocrResult.wordCount}`);
+      await logStep(
+        documentId,
+        'ocr',
+        'success',
+        Date.now() - ocrStart,
+        `wordCount=${ocrResult.wordCount}`
+      );
 
-      const failureCheck = await checkForExternalFailure(documentId, history);
+      const failureCheck = await checkForExternalFailure(documentId);
       if (failureCheck.failed) {
+        currentStatus = failureCheck.status;
+        history = failureCheck.history;
         return { id: documentId, status: 'needs_manual_entry' };
       }
       rawText = ocrResult.text;
+      ocrQualityScore = ocrResult.ocrQualityScore;
     }
 
     if (!rawText.trim()) {
-      history = await transition(
-        documentId,
-        history,
-        'needs_manual_entry',
-        'No usable text could be extracted from the document'
-      );
+      await advance('needs_manual_entry', 'No usable text could be extracted from the document');
       return { id: documentId, status: 'needs_manual_entry' };
     }
 
-    history = await transition(documentId, history, 'running_llm', 'Structuring extracted text via LLM');
+    await advance('running_llm', 'Structuring extracted text via LLM');
 
     const llmStart = Date.now();
     const structureResult = await structureDocumentWithRetry(documentId, rawText);
@@ -237,14 +290,32 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
     );
 
     if (!structureResult.success) {
-      history = await transition(documentId, history, 'needs_manual_entry', structureResult.error);
+      // structureDocumentWithRetry already routed this failure through
+      // handleRetryExhaustion (Phase 11/18) once its own retry was exhausted —
+      // resync from the DB rather than writing a second, redundant transition.
+      const failureCheck = await checkForExternalFailure(documentId);
+      if (failureCheck.failed) {
+        currentStatus = failureCheck.status;
+        history = failureCheck.history;
+      } else {
+        // Shouldn't happen given structureDocumentWithRetry's contract, but
+        // never report a status the DB doesn't actually have.
+        await advance('needs_manual_entry', structureResult.error);
+      }
       return { id: documentId, status: 'needs_manual_entry' };
     }
 
-    history = await transition(documentId, history, 'validating', 'Validating structured output against schema');
+    await advance('validating', 'Validating structured output against schema');
 
     const data = structureResult.data;
     const saveStart = Date.now();
+    const { fieldConfidence: rawFieldConfidence, missingFields } = collectConfidenceSignals(data);
+    const { fieldConfidence, overallConfidence } = score({
+      fieldConfidence: rawFieldConfidence,
+      ocrQualityScore,
+      schemaValid: structureResult.success,
+      arithmeticChecks: runArithmeticChecks(data),
+    });
 
     const { data: extraction, error: insertError } = await supabase
       .from('document_extractions')
@@ -259,15 +330,24 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
         total_amount: data.total,
         raw_text: rawText,
         extracted_data: data,
+        field_confidence: fieldConfidence,
+        ocr_quality_score: ocrQualityScore,
+        schema_valid: structureResult.success,
+        missing_fields: missingFields,
+        overall_confidence: overallConfidence,
       })
       .select()
       .single();
 
     if (insertError || !extraction) {
-      await logStep(documentId, 'save_extraction', 'failed', Date.now() - saveStart, insertError?.message);
-      history = await transition(
+      await logStep(
         documentId,
-        history,
+        'save_extraction',
+        'failed',
+        Date.now() - saveStart,
+        insertError?.message
+      );
+      await advance(
         'needs_manual_entry',
         `Failed to save extraction: ${insertError?.message ?? 'unknown error'}`
       );
@@ -287,28 +367,59 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
       );
 
       if (lineItemsError) {
-        await logStep(documentId, 'save_extraction', 'failed', Date.now() - saveStart, lineItemsError.message);
-        history = await transition(
+        await logStep(
           documentId,
-          history,
-          'needs_manual_entry',
-          `Failed to save line items: ${lineItemsError.message}`
+          'save_extraction',
+          'failed',
+          Date.now() - saveStart,
+          lineItemsError.message
         );
+        await advance('needs_manual_entry', `Failed to save line items: ${lineItemsError.message}`);
         return { id: documentId, status: 'needs_manual_entry' };
       }
     }
 
     await logStep(documentId, 'save_extraction', 'success', Date.now() - saveStart);
 
-    history = await transition(documentId, history, 'awaiting_review', 'Extraction saved; awaiting review');
+    await advance('awaiting_review', 'Extraction saved; awaiting review');
     return { id: documentId, status: 'awaiting_review' };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error during processing';
     try {
-      await transition(documentId, history, 'needs_manual_entry', message);
+      await advance('needs_manual_entry', message);
     } catch (transitionError) {
       console.error(`Failed to record failure for document ${documentId}:`, transitionError);
     }
     return { id: documentId, status: 'needs_manual_entry' };
+  } finally {
+    // Runs after every return path above (success or failure) so pipeline
+    // execution health is scored regardless of outcome — it's independent of
+    // how trustworthy the extracted data itself turned out to be.
+    try {
+      const { data: logs, error: logsError } = await supabase
+        .from('processing_logs')
+        .select('step, status')
+        .eq('document_id', documentId);
+
+      if (logsError) {
+        throw new Error(logsError.message);
+      }
+
+      const { score: processingConfidence } = scoreProcessing(logs ?? []);
+
+      const { error: updateError } = await supabase
+        .from('documents')
+        .update({ processing_confidence: processingConfidence })
+        .eq('id', documentId);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
+    } catch (scoringError) {
+      console.error(
+        `Failed to compute/persist processing_confidence for document ${documentId}:`,
+        scoringError
+      );
+    }
   }
 }

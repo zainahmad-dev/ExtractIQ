@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
 import { isDocumentStatus, type DocumentStatus } from '@/types/status';
 import { processDocument } from '@/lib/jobs/process-document';
+import { claimTransition } from '@/lib/validation/state-machine';
 
 /** Every status except the three terminal resting states is eligible for recovery. */
 const RECOVERABLE_STATUSES: DocumentStatus[] = [
@@ -44,7 +45,10 @@ export async function POST() {
     .lt('updated_at', cutoff);
 
   if (error) {
-    return NextResponse.json({ error: `Failed to query stuck documents: ${error.message}` }, { status: 500 });
+    return NextResponse.json(
+      { error: `Failed to query stuck documents: ${error.message}` },
+      { status: 500 }
+    );
   }
 
   const results: SweepResult[] = [];
@@ -63,25 +67,15 @@ export async function POST() {
 
     try {
       if (status !== 'queued') {
-        const nextHistory = [
-          ...doc.status_history,
-          {
-            status: 'queued',
-            at: new Date().toISOString(),
-            message: `Recovered by sweep after stalling in '${status}' for over ${Math.round(STUCK_TIMEOUT_MS / 1000)}s`,
-          },
-        ];
+        const message = `Recovered by sweep after stalling in '${status}' for over ${Math.round(STUCK_TIMEOUT_MS / 1000)}s`;
 
-        const { data: reset, error: resetError } = await supabase
-          .from('documents')
-          .update({ status: 'queued', status_history: nextHistory })
-          .eq('id', doc.id)
-          .eq('status', status)
-          .select()
-          .maybeSingle();
-
-        if (resetError) {
-          results.push({ id: doc.id, previousStatus: status, status, error: resetError.message });
+        let reset;
+        try {
+          reset = await claimTransition(doc.id, status, 'queued', doc.status_history, message);
+        } catch (transitionError) {
+          const detail =
+            transitionError instanceof Error ? transitionError.message : 'Unknown error';
+          results.push({ id: doc.id, previousStatus: status, status, error: detail });
           continue;
         }
 

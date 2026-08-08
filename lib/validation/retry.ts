@@ -1,5 +1,6 @@
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
-import type { DocumentStatus } from '@/types/status';
+import { isDocumentStatus } from '@/types/status';
+import { transitionStatus } from '@/lib/validation/state-machine';
 
 export interface RetryOptions {
   retries: number;
@@ -25,25 +26,37 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions):
   throw lastError;
 }
 
-const NEEDS_MANUAL_ENTRY: DocumentStatus = 'needs_manual_entry';
-
 /**
- * Called once withRetry exhausts its attempts. Sets documents.status and
- * error_reason directly — Phase 18 will route this through the formal state
- * machine; until then this is the single place that performs the write, so
- * OCR and LLM structuring land on it consistently.
+ * Called once withRetry exhausts its attempts. Reads the document's current
+ * status + status_history and hands off to Phase 18's state machine for the
+ * actual write — the single place OCR and LLM structuring land on
+ * consistently, and now (unlike before Phase 18) status_history correctly
+ * gets the failure entry appended as part of the same write.
  */
 export async function handleRetryExhaustion(documentId: string, reason: string): Promise<void> {
   const supabase = getSupabaseAdminClient();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('documents')
-    .update({ status: NEEDS_MANUAL_ENTRY, error_reason: reason })
-    .eq('id', documentId);
+    .select('status, status_history')
+    .eq('id', documentId)
+    .single();
 
-  if (error) {
+  if (error || !data) {
     throw new Error(
-      `Failed to record retry exhaustion for document ${documentId}: ${error.message}`
+      `Failed to read document ${documentId} before recording retry exhaustion: ${error?.message ?? 'not found'}`
     );
   }
+
+  if (!isDocumentStatus(data.status)) {
+    throw new Error(`Document ${documentId} has an unrecognized status: ${data.status}`);
+  }
+
+  await transitionStatus(
+    documentId,
+    data.status,
+    'needs_manual_entry',
+    data.status_history,
+    reason
+  );
 }
