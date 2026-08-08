@@ -63,10 +63,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Failed to create document record.' }, { status: 500 });
   }
 
-  // Non-blocking: kick off processing after the response is sent. The
-  // /api/process/[id] endpoint doesn't exist until Phase 12, so this request
-  // 404s for now — that's expected and handled here; Phase 12 replaces this
-  // trigger with a real call once the endpoint exists.
+  // Non-blocking: kick off processing after the response is sent, via
+  // Phase 12's orchestrator endpoint.
   const processUrl = new URL(`/api/process/${document.id}`, request.url);
   after(() => {
     fetch(processUrl, { method: 'POST' }).catch((err: unknown) => {
