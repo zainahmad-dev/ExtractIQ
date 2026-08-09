@@ -49,7 +49,15 @@ export interface Database {
         Update: Partial<Database['public']['Tables']['documents']['Insert']>;
       };
       document_extractions: {
-        Relationships: [];
+        Relationships: [
+          {
+            foreignKeyName: 'document_extractions_document_id_fkey';
+            columns: ['document_id'];
+            isOneToOne: false;
+            referencedRelation: 'documents';
+            referencedColumns: ['id'];
+          },
+        ];
         Row: {
           id: string;
           document_id: string;
