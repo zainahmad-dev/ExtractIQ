@@ -41,6 +41,7 @@ export async function POST(request: NextRequest) {
     .upload(storagePath, file, { contentType: file.type });
 
   if (uploadError) {
+    console.error('[upload] storage upload failed:', uploadError);
     return NextResponse.json({ error: 'Failed to store the file.' }, { status: 500 });
   }
 
