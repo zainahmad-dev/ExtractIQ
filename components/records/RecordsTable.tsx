@@ -83,11 +83,17 @@ export function RecordsTable({ items, loading, sortBy, onSortChange }: RecordsTa
               const Icon = isActive ? (activeSort.ascending ? ArrowUp : ArrowDown) : ArrowUpDown;
               return (
                 <th key={column.field} className="px-4 py-3 font-medium">
+                  {/* The label itself is only 16px tall. The padding here (and
+                      the matching negative margin, which keeps the header row
+                      the same height) stretches the tap area into the cell's
+                      own padding below md; from md up the box is exactly what
+                      it was. */}
                   <button
                     type="button"
                     onClick={() => toggleSort(column.field)}
                     className={cn(
-                      'inline-flex items-center gap-1.5 hover:text-foreground',
+                      'inline-flex items-center gap-1.5 py-3 hover:text-foreground',
+                      'min-h-11 -my-3 md:my-0 md:min-h-0 md:py-0',
                       isActive && 'text-foreground'
                     )}
                   >
@@ -116,9 +122,12 @@ export function RecordsTable({ items, loading, sortBy, onSortChange }: RecordsTa
                 className="border-b border-surface-elevated last:border-0 hover:bg-surface-elevated/50"
               >
                 <td className="px-4 py-3">
+                  {/* Same trick as the sort headers: on touch widths the link
+                      fills the cell's height so the row is tappable rather than
+                      just the 18px of text. Back to an inline link from md. */}
                   <Link
                     href={`/processing/${item.id}`}
-                    className="font-medium hover:text-primary"
+                    className="block py-3 font-medium hover:text-primary -my-3 md:my-0 md:inline md:py-0"
                   >
                     {item.vendorName || item.filename}
                   </Link>

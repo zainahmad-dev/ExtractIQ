@@ -9,6 +9,14 @@ export interface RecordsPaginationProps {
   onPageChange: (page: number) => void;
 }
 
+/**
+ * The two page buttons are icon-only, which at the design system's sm size
+ * comes to 42x32 — under the 44px a fingertip needs. min-h/min-w (rather than
+ * h-/w-) because utils/cn.ts concatenates classes instead of merging them, so
+ * an h-11 would sit alongside Button's own h-8 rather than replacing it. From
+ * md up — the width at which the app swaps its mobile chrome for the desktop
+ * sidebar — the buttons keep exactly their existing size.
+ */
 export function RecordsPagination({
   page,
   pageSize,
@@ -32,6 +40,7 @@ export function RecordsPagination({
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
           aria-label="Previous page"
+          className="min-h-11 min-w-11 md:min-h-0 md:min-w-0"
         >
           <ChevronLeft size={16} />
         </Button>
@@ -45,6 +54,7 @@ export function RecordsPagination({
           onClick={() => onPageChange(page + 1)}
           disabled={page >= totalPages}
           aria-label="Next page"
+          className="min-h-11 min-w-11 md:min-h-0 md:min-w-0"
         >
           <ChevronRight size={16} />
         </Button>
