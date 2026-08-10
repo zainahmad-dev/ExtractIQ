@@ -309,13 +309,22 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
             </div>
 
             <div className="flex flex-col gap-2">
+              {/* The four fixed columns below need ~336px before the description
+                  gets any width at all, so on a phone they collapsed it to a
+                  26px sliver and scrolled the card sideways. Under sm the row
+                  wraps instead: description (spanning) and the delete button on
+                  the first line, the three numeric fields sharing the second.
+                  From sm up it is the original single-line five-column row —
+                  with the delete column held at 44px until md so the enlarged
+                  touch target below has a track wide enough to sit in. */}
               {fields.map((item, index) => (
                 <div
                   key={item.id}
-                  className="grid grid-cols-[1fr_5rem_6rem_6rem_2rem] items-center gap-2"
+                  className="grid grid-cols-[1fr_1fr_1fr_2.75rem] items-center gap-2 sm:grid-cols-[1fr_5rem_6rem_6rem_2.75rem] md:grid-cols-[1fr_5rem_6rem_6rem_2rem]"
                 >
                   <Input
                     placeholder="Description"
+                    className="col-span-3 sm:col-span-1"
                     {...register(`lineItems.${index}.description`)}
                   />
                   <Input
@@ -342,12 +351,20 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
                       setValueAs: (value) => (value === '' ? null : Number(value)),
                     })}
                   />
+                  {/* Placed explicitly so it takes the first row's last cell and
+                      the numeric inputs flow onto the second; min-* rather than
+                      h-/w- because utils/cn.ts concatenates classes instead of
+                      merging them, so a plain h-11 would sit alongside the
+                      Button's own h-8 rather than replacing it. The 44px floor
+                      lifts until md — the width at which the app swaps its
+                      mobile chrome (BottomNav) for the desktop sidebar. */}
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     onClick={() => remove(index)}
                     aria-label="Remove line item"
+                    className="col-start-4 row-start-1 min-h-11 min-w-11 sm:col-start-auto sm:row-start-auto md:min-h-0 md:min-w-0"
                   >
                     <Trash2 size={14} />
                   </Button>
@@ -359,7 +376,7 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
               type="button"
               variant="outline"
               size="sm"
-              className="self-start"
+              className="min-h-11 self-start md:min-h-0"
               onClick={() =>
                 append({ description: null, quantity: null, unitPrice: null, amount: null })
               }
