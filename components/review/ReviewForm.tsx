@@ -4,11 +4,12 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm, useFieldArray, type Resolver } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Trash2 } from 'lucide-react';
+import { AlertTriangle, Trash2 } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { ConfidenceBadge } from '@/components/ui/ConfidenceBadge';
+import { usePreferences } from '@/hooks/usePreferences';
 import { extractedDocumentSchema, type ExtractedDocument } from '@/types/document';
 import { cn } from '@/utils/cn';
 
@@ -39,12 +40,46 @@ export interface ReviewFormProps {
   draft: ReviewDraft;
 }
 
-/** Same thresholds as components/ui/ConfidenceBadge.tsx, reused here to color the inputs themselves, not just the adjacent badge. */
-function confidenceBorderClass(score: number | null | undefined): string {
+/** A field is flagged when Phase 16's score falls under the reviewer's configured threshold (Phase 26's setting). */
+function isFlagged(score: number | null | undefined, threshold: number): boolean {
+  return typeof score === 'number' && score < threshold;
+}
+
+/**
+ * Colors the input itself, not just the adjacent badge. The boundary is the
+ * configured threshold rather than a fixed band, so changing the setting
+ * immediately changes what reads as "needs attention" here — ConfidenceBadge
+ * keeps its own Phase 2 color bands, which are about the score, not the flag.
+ */
+function confidenceBorderClass(score: number | null | undefined, threshold: number): string {
   if (score === null || score === undefined) return '';
-  if (score >= 95) return 'border-success/50 focus-visible:ring-success';
-  if (score >= 85) return 'border-warning/50 focus-visible:ring-warning';
-  return 'border-danger/50 focus-visible:ring-danger';
+  return isFlagged(score, threshold)
+    ? 'border-danger/50 focus-visible:ring-danger'
+    : 'border-success/50 focus-visible:ring-success';
+}
+
+/** The badge plus, when the field is under threshold, a non-color-only warning marker. */
+function ConfidenceIndicator({
+  score,
+  threshold,
+}: {
+  score: number | undefined;
+  threshold: number;
+}) {
+  if (score === undefined) return null;
+
+  return (
+    <span className="flex items-center gap-1.5">
+      {isFlagged(score, threshold) && (
+        <AlertTriangle
+          size={12}
+          className="text-danger"
+          aria-label={`Below the ${threshold}% confidence threshold`}
+        />
+      )}
+      <ConfidenceBadge score={score} />
+    </span>
+  );
 }
 
 function toFormValues(draft: ReviewDraft): ExtractedDocument {
@@ -94,12 +129,16 @@ const NUMBER_FIELDS: NumberFieldConfig[] = [
 
 export function ReviewForm({ documentId, draft }: ReviewFormProps) {
   const router = useRouter();
+  const { confidenceThreshold } = usePreferences();
   const [actionState, setActionState] = useState<ActionState>('idle');
   const [actionError, setActionError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const isDecided = draft.review_status !== 'pending_review';
   const fieldConfidence = draft.field_confidence ?? {};
+  const flaggedCount = Object.values(fieldConfidence).filter((score) =>
+    isFlagged(score, confidenceThreshold)
+  ).length;
 
   const {
     register,
@@ -183,6 +222,17 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
         </div>
       )}
 
+      {flaggedCount > 0 && (
+        <div className="flex items-start gap-2 rounded-control border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <p>
+            {flaggedCount} {flaggedCount === 1 ? 'field falls' : 'fields fall'} below your{' '}
+            {confidenceThreshold}% confidence threshold. Check {flaggedCount === 1 ? 'it' : 'them'}{' '}
+            against the source before approving.
+          </p>
+        </div>
+      )}
+
       {actionError && (
         <div className="rounded-control border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger">
           {actionError}
@@ -198,14 +248,18 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
                   <label htmlFor={field.name} className="text-sm font-medium text-muted-foreground">
                     {field.label}
                   </label>
-                  {field.confidenceKey in fieldConfidence && (
-                    <ConfidenceBadge score={fieldConfidence[field.confidenceKey]} />
-                  )}
+                  <ConfidenceIndicator
+                    score={fieldConfidence[field.confidenceKey]}
+                    threshold={confidenceThreshold}
+                  />
                 </div>
                 <Input
                   id={field.name}
                   {...register(field.name)}
-                  className={confidenceBorderClass(fieldConfidence[field.confidenceKey])}
+                  className={confidenceBorderClass(
+                    fieldConfidence[field.confidenceKey],
+                    confidenceThreshold
+                  )}
                 />
                 {errors[field.name] && (
                   <p className="text-xs text-danger">{errors[field.name]?.message}</p>
@@ -221,9 +275,10 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
                   <label htmlFor={field.name} className="text-sm font-medium text-muted-foreground">
                     {field.label}
                   </label>
-                  {field.confidenceKey in fieldConfidence && (
-                    <ConfidenceBadge score={fieldConfidence[field.confidenceKey]} />
-                  )}
+                  <ConfidenceIndicator
+                    score={fieldConfidence[field.confidenceKey]}
+                    threshold={confidenceThreshold}
+                  />
                 </div>
                 <Input
                   id={field.name}
@@ -232,7 +287,10 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
                   {...register(field.name, {
                     setValueAs: (value) => (value === '' ? null : Number(value)),
                   })}
-                  className={confidenceBorderClass(fieldConfidence[field.confidenceKey])}
+                  className={confidenceBorderClass(
+                    fieldConfidence[field.confidenceKey],
+                    confidenceThreshold
+                  )}
                 />
                 {errors[field.name] && (
                   <p className="text-xs text-danger">{errors[field.name]?.message}</p>
@@ -244,9 +302,10 @@ export function ReviewForm({ documentId, draft }: ReviewFormProps) {
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Line Items</h2>
-              {'line_items' in fieldConfidence && (
-                <ConfidenceBadge score={fieldConfidence.line_items} />
-              )}
+              <ConfidenceIndicator
+                score={fieldConfidence.line_items}
+                threshold={confidenceThreshold}
+              />
             </div>
 
             <div className="flex flex-col gap-2">

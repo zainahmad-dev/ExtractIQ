@@ -144,6 +144,22 @@ export interface Database {
         };
         Update: Partial<Database['public']['Tables']['exports']['Insert']>;
       };
+      app_settings: {
+        Relationships: [];
+        Row: {
+          id: boolean;
+          confidence_threshold: number;
+          default_export_format: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: boolean;
+          confidence_threshold?: number;
+          default_export_format?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['app_settings']['Insert']>;
+      };
       processing_logs: {
         Relationships: [];
         Row: {
