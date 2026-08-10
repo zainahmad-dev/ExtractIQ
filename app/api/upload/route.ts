@@ -1,12 +1,13 @@
 import { randomUUID } from 'crypto';
 import { NextResponse, after, type NextRequest } from 'next/server';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient, DOCUMENTS_BUCKET } from '@/lib/storage/supabase';
 import type { DocumentStatus } from '@/types/status';
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ['application/pdf', 'image/png', 'image/jpeg'];
 
-export async function POST(request: NextRequest) {
+export const POST = withApiErrorHandler(async (request: NextRequest) => {
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -74,4 +75,4 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({ id: document.id, status: document.status }, { status: 201 });
-}
+});

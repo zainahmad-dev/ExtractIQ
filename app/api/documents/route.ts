@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
 import {
   RECORDS_SORT_FIELDS,
@@ -54,7 +55,7 @@ function sanitizeSearchTerm(value: string): string {
  * document still awaiting review (or mid-pipeline) never appears here —
  * that's the Review screen's job, not this one's.
  */
-export async function GET(request: NextRequest) {
+export const GET = withApiErrorHandler(async (request: NextRequest) => {
   const raw = Object.fromEntries(
     Array.from(request.nextUrl.searchParams.entries()).filter(([, value]) => value !== '')
   );
@@ -190,4 +191,4 @@ export async function GET(request: NextRequest) {
   };
 
   return NextResponse.json(response, { status: 200 });
-}
+});

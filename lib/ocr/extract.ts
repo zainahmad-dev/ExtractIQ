@@ -168,11 +168,33 @@ export async function extractTextFromPdf(
 }
 
 /**
+ * Two different exhaustion cases reach the same catch, and they don't mean
+ * the same thing: an attempt that *ran* but recognized almost nothing (a
+ * blank or unreadable scan) leaves a result behind, while an attempt that
+ * threw (an undecodable image, a PDF whose pages won't rasterise, a worker
+ * that wouldn't start) leaves none. Reporting the first message for the
+ * second case would put a wrong reason on documents.error_reason.
+ */
+function describeOcrExhaustion(lastResult: OcrResult | undefined, lastError: unknown): string {
+  if (lastResult) {
+    return `OCR produced near-empty output after retry (${lastResult.wordCount} word(s) recognized)`;
+  }
+  const detail = lastError instanceof Error ? lastError.message : 'unknown error';
+  return `OCR failed after retry: ${detail}`;
+}
+
+/** Stands in when every attempt threw, so callers get a real (empty) result instead of `undefined`. */
+function emptyOcrResult(): OcrResult {
+  return { text: '', ocrQualityScore: 0, wordCount: 0, pages: [], appliedSteps: [] };
+}
+
+/**
  * extractTextFromImage, retried once on near-empty output. On exhaustion,
  * records documents.status = 'needs_manual_entry' + error_reason directly
  * (Phase 18 formalizes this through the shared state machine) and returns
  * the last attempt's result so the caller still has whatever text, if any,
- * was recovered.
+ * was recovered — an empty result when no attempt got far enough to produce
+ * one.
  */
 export async function extractTextFromImageWithRetry(
   documentId: string,
@@ -195,12 +217,9 @@ export async function extractTextFromImageWithRetry(
       },
       { retries: 1 }
     );
-  } catch {
-    await handleRetryExhaustion(
-      documentId,
-      `OCR produced near-empty output after retry (${lastResult?.wordCount ?? 0} word(s) recognized)`
-    );
-    return lastResult!;
+  } catch (error) {
+    await handleRetryExhaustion(documentId, describeOcrExhaustion(lastResult, error));
+    return lastResult ?? emptyOcrResult();
   }
 }
 
@@ -229,11 +248,8 @@ export async function extractTextFromPdfWithRetry(
       },
       { retries: 1 }
     );
-  } catch {
-    await handleRetryExhaustion(
-      documentId,
-      `OCR produced near-empty output after retry (${lastResult?.wordCount ?? 0} word(s) recognized)`
-    );
-    return lastResult!;
+  } catch (error) {
+    await handleRetryExhaustion(documentId, describeOcrExhaustion(lastResult, error));
+    return lastResult ?? emptyOcrResult();
   }
 }

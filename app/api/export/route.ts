@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
 import { toCsv } from '@/lib/export/csv';
 import { toJson } from '@/lib/export/json';
@@ -35,7 +36,7 @@ const CONTENT_TYPES = {
   json: 'application/json; charset=utf-8',
 } as const;
 
-export async function GET(request: NextRequest) {
+export const GET = withApiErrorHandler(async (request: NextRequest) => {
   const raw = Object.fromEntries(
     Array.from(request.nextUrl.searchParams.entries()).filter(([, value]) => value !== '')
   );
@@ -146,4 +147,4 @@ export async function GET(request: NextRequest) {
       'X-Export-Record-Count': String(records.length),
     },
   });
-}
+});

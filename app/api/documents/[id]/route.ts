@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient, DOCUMENTS_BUCKET } from '@/lib/storage/supabase';
 
 interface RouteContext {
@@ -19,7 +20,7 @@ const SIGNED_URL_EXPIRY_SECONDS = 60 * 60;
  * latest extraction draft + its line items and a signed URL to the source
  * file, so the polling endpoint's cost/shape stays exactly as it was.
  */
-export async function GET(request: NextRequest, { params }: RouteContext) {
+export const GET = withApiErrorHandler(async (request: NextRequest, { params }: RouteContext) => {
   const { id } = await params;
   const supabase = getSupabaseAdminClient();
   const full = request.nextUrl.searchParams.get('full') === 'true';
@@ -74,4 +75,4 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     { ...document, fileUrl: signedUrlResult.data?.signedUrl ?? null, draft },
     { status: 200 }
   );
-}
+});

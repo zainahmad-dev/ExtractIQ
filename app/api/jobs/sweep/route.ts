@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
 import { isDocumentStatus, type DocumentStatus } from '@/types/status';
 import { processDocument } from '@/lib/jobs/process-document';
@@ -34,7 +35,7 @@ interface SweepResult {
  * to 'queued' first — there's no partial-resume support, so recovery re-runs
  * the whole pipeline from the top.
  */
-export async function POST() {
+export const POST = withApiErrorHandler(async () => {
   const supabase = getSupabaseAdminClient();
   const cutoff = new Date(Date.now() - STUCK_TIMEOUT_MS).toISOString();
 
@@ -94,4 +95,4 @@ export async function POST() {
   }
 
   return NextResponse.json({ swept: results.length, results });
-}
+});

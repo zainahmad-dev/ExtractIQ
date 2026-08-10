@@ -43,24 +43,48 @@ interface OllamaGenerateResponse {
   total_duration?: number;
 }
 
+/**
+ * Node's fetch reports every transport failure as the same opaque "fetch
+ * failed"; the socket-level code that says *why* (ECONNREFUSED when Ollama
+ * isn't running, ENOTFOUND for a bad host) hangs off error.cause. Both are
+ * surfaced so the reason that ends up on documents.error_reason names the
+ * actual problem.
+ */
+function describeTransportFailure(error: unknown): string {
+  if (!(error instanceof Error)) return 'unknown error';
+  const cause: unknown = error.cause;
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause
+      ? String((cause as { code: unknown }).code)
+      : null;
+  return code ? `${error.message} (${code})` : error.message;
+}
+
 /** Calls Ollama's /api/generate with a fully-built prompt. Not wired into any route yet. */
 export async function generateCompletion(
   prompt: string,
   options: GenerateOptions = {}
 ): Promise<GenerateResult> {
-  const response = await fetch(`${config.ollama.baseUrl}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.ollama.model,
-      prompt,
-      stream: false,
-      ...(options.format !== undefined ? { format: options.format } : {}),
-      ...(options.temperature !== undefined
-        ? { options: { temperature: options.temperature } }
-        : {}),
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${config.ollama.baseUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ollama.model,
+        prompt,
+        stream: false,
+        ...(options.format !== undefined ? { format: options.format } : {}),
+        ...(options.temperature !== undefined
+          ? { options: { temperature: options.temperature } }
+          : {}),
+      }),
+    });
+  } catch (error) {
+    throw new Error(
+      `Ollama is unreachable at ${config.ollama.baseUrl}: ${describeTransportFailure(error)}`
+    );
+  }
 
   if (!response.ok) {
     const errorBody = await response.text();

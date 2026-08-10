@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { DocumentNotFoundError, processDocument } from '@/lib/jobs/process-document';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
+import { processDocument } from '@/lib/jobs/process-document';
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -9,19 +10,15 @@ interface RouteContext {
  * Idempotent: process-document.ts only advances documents in 'queued' status,
  * so re-invoking this on an already-processed or in-flight document is a
  * safe no-op that just reports the current status back.
+ *
+ * processDocument() resolves a failed pipeline run to 'needs_manual_entry'
+ * rather than throwing, so a 200 here doesn't mean the document succeeded —
+ * it means the run reached a decided state. Anything that does throw
+ * (including DocumentNotFoundError, which the shared handler maps to 404)
+ * comes back as `{ error }` from lib/api-error-handler.ts.
  */
-export async function POST(_request: NextRequest, { params }: RouteContext) {
+export const POST = withApiErrorHandler(async (_request: NextRequest, { params }: RouteContext) => {
   const { id } = await params;
-
-  try {
-    const result = await processDocument(id);
-    return NextResponse.json(result, { status: 200 });
-  } catch (error) {
-    if (error instanceof DocumentNotFoundError) {
-      return NextResponse.json({ error: error.message }, { status: 404 });
-    }
-
-    const message = error instanceof Error ? error.message : 'Unknown error processing document';
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
+  const result = await processDocument(id);
+  return NextResponse.json(result, { status: 200 });
+});

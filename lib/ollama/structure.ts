@@ -85,8 +85,19 @@ export async function structureDocumentWithRetry(
       },
       { retries: 1 }
     );
-  } catch {
-    const failure = lastResult as Extract<StructureResult, { success: false }>;
+  } catch (error) {
+    // structureDocument resolves its own failures rather than throwing, so
+    // lastResult normally holds the reason. It's only missing if something
+    // upstream of it threw (a prompt builder blowing up on the raw text) —
+    // in which case that error is the accurate reason to record.
+    const failure: Extract<StructureResult, { success: false }> =
+      lastResult && !lastResult.success
+        ? lastResult
+        : {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error structuring document',
+            rawOutput: '',
+          };
     await handleRetryExhaustion(documentId, failure.error);
     return failure;
   }

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
 import {
   CONFIDENCE_THRESHOLD_MAX,
@@ -48,7 +49,7 @@ function toPreferences(row: SettingsRow): Preferences {
   };
 }
 
-export async function GET() {
+export const GET = withApiErrorHandler(async () => {
   const supabase = getSupabaseAdminClient();
 
   const { data, error } = await supabase
@@ -66,9 +67,9 @@ export async function GET() {
 
   // The migration seeds the row; this only covers a table that was truncated.
   return NextResponse.json(data ? toPreferences(data) : DEFAULT_PREFERENCES, { status: 200 });
-}
+});
 
-export async function PATCH(request: NextRequest) {
+export const PATCH = withApiErrorHandler(async (request: NextRequest) => {
   let body: unknown;
   try {
     body = await request.json();
@@ -112,4 +113,4 @@ export async function PATCH(request: NextRequest) {
   }
 
   return NextResponse.json(toPreferences(data), { status: 200 });
-}
+});

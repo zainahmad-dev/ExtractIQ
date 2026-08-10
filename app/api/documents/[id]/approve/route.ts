@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
-import { transitionStatus, InvalidStatusTransitionError } from '@/lib/validation/state-machine';
+import { transitionStatus } from '@/lib/validation/state-machine';
 import { isDocumentStatus } from '@/types/status';
 import { draftEditSchema, getLatestDraft, applyDraftEdits } from '@/lib/documents/draft-helpers';
 
@@ -12,10 +13,12 @@ interface RouteContext {
  * Approves the document's current draft: persists any inline corrections
  * sent in the (optional) body, marks the draft review_status=approved with
  * approved_at, then advances documents.status to 'completed' through Phase
- * 18's state machine — which naturally rejects the request (409) if the
- * document wasn't actually awaiting review.
+ * 18's state machine — which naturally rejects the request if the document
+ * wasn't actually awaiting review, by throwing InvalidStatusTransitionError.
+ * lib/api-error-handler.ts maps that to the 409 this route used to build
+ * itself; every other write failure surfaces as a 500 `{ error }`.
  */
-export async function POST(request: NextRequest, { params }: RouteContext) {
+export const POST = withApiErrorHandler(async (request: NextRequest, { params }: RouteContext) => {
   const { id } = await params;
 
   let rawBody: string;
@@ -36,18 +39,14 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
 
   const parsedEdits = draftEditSchema.safeParse(body);
   if (!parsedEdits.success) {
-    return NextResponse.json({ error: parsedEdits.error.message }, { status: 400 });
+    return NextResponse.json(
+      { error: parsedEdits.error.issues[0]?.message ?? 'Invalid draft payload.' },
+      { status: 400 }
+    );
   }
 
   const supabase = getSupabaseAdminClient();
-
-  let draft;
-  try {
-    draft = await getLatestDraft(supabase, id);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  const draft = await getLatestDraft(supabase, id);
 
   if (!draft) {
     return NextResponse.json(
@@ -73,34 +72,26 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     );
   }
 
-  try {
-    await applyDraftEdits(supabase, draft.id, parsedEdits.data);
+  await applyDraftEdits(supabase, draft.id, parsedEdits.data);
 
-    const { error: approveError } = await supabase
-      .from('document_extractions')
-      .update({ review_status: 'approved', approved_at: new Date().toISOString() })
-      .eq('id', draft.id);
-    if (approveError) {
-      throw new Error(`Failed to approve draft ${draft.id}: ${approveError.message}`);
-    }
-
-    await transitionStatus(
-      id,
-      document.status,
-      'completed',
-      document.status_history,
-      'Approved by reviewer'
-    );
-  } catch (error) {
-    if (error instanceof InvalidStatusTransitionError) {
-      return NextResponse.json({ error: error.message }, { status: 409 });
-    }
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 500 });
+  const { error: approveError } = await supabase
+    .from('document_extractions')
+    .update({ review_status: 'approved', approved_at: new Date().toISOString() })
+    .eq('id', draft.id);
+  if (approveError) {
+    throw new Error(`Failed to approve draft ${draft.id}: ${approveError.message}`);
   }
+
+  await transitionStatus(
+    id,
+    document.status,
+    'completed',
+    document.status_history,
+    'Approved by reviewer'
+  );
 
   return NextResponse.json(
     { id, documentStatus: 'completed', reviewStatus: 'approved' },
     { status: 200 }
   );
-}
+});

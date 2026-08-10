@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { withApiErrorHandler } from '@/lib/api-error-handler';
 import { getSupabaseAdminClient } from '@/lib/storage/supabase';
-import { transitionStatus, InvalidStatusTransitionError } from '@/lib/validation/state-machine';
+import { transitionStatus } from '@/lib/validation/state-machine';
 import { isDocumentStatus } from '@/types/status';
 import { getLatestDraft } from '@/lib/documents/draft-helpers';
 
@@ -12,19 +13,15 @@ interface RouteContext {
  * Rejects the document's current draft: marks review_status=rejected (no
  * inline edits — rejecting says the data isn't trustworthy, it doesn't
  * correct it) and advances documents.status to 'completed' through Phase
- * 18's state machine, same terminal state as approval.
+ * 18's state machine, same terminal state as approval. As with approve, an
+ * InvalidStatusTransitionError from that state machine reaches the client as
+ * a 409 `{ error }` via lib/api-error-handler.ts.
  */
-export async function POST(_request: NextRequest, { params }: RouteContext) {
+export const POST = withApiErrorHandler(async (_request: NextRequest, { params }: RouteContext) => {
   const { id } = await params;
   const supabase = getSupabaseAdminClient();
 
-  let draft;
-  try {
-    draft = await getLatestDraft(supabase, id);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  const draft = await getLatestDraft(supabase, id);
 
   if (!draft) {
     return NextResponse.json(
@@ -50,32 +47,24 @@ export async function POST(_request: NextRequest, { params }: RouteContext) {
     );
   }
 
-  try {
-    const { error: rejectError } = await supabase
-      .from('document_extractions')
-      .update({ review_status: 'rejected' })
-      .eq('id', draft.id);
-    if (rejectError) {
-      throw new Error(`Failed to reject draft ${draft.id}: ${rejectError.message}`);
-    }
-
-    await transitionStatus(
-      id,
-      document.status,
-      'completed',
-      document.status_history,
-      'Rejected by reviewer'
-    );
-  } catch (error) {
-    if (error instanceof InvalidStatusTransitionError) {
-      return NextResponse.json({ error: error.message }, { status: 409 });
-    }
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 500 });
+  const { error: rejectError } = await supabase
+    .from('document_extractions')
+    .update({ review_status: 'rejected' })
+    .eq('id', draft.id);
+  if (rejectError) {
+    throw new Error(`Failed to reject draft ${draft.id}: ${rejectError.message}`);
   }
+
+  await transitionStatus(
+    id,
+    document.status,
+    'completed',
+    document.status_history,
+    'Rejected by reviewer'
+  );
 
   return NextResponse.json(
     { id, documentStatus: 'completed', reviewStatus: 'rejected' },
     { status: 200 }
   );
-}
+});

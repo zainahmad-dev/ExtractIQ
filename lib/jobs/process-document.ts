@@ -95,15 +95,19 @@ function readStatus(documentId: string, status: string): DocumentStatus {
  * row to detect that it happened and resync this function's local
  * status/history with what was written, before the pipeline stops.
  */
-async function checkForExternalFailure(
-  documentId: string
-): Promise<
-  { failed: false } | { failed: true; status: DocumentStatus; history: StatusHistoryEntry[] }
+async function checkForExternalFailure(documentId: string): Promise<
+  | { failed: false }
+  | {
+      failed: true;
+      status: DocumentStatus;
+      history: StatusHistoryEntry[];
+      errorReason: string | null;
+    }
 > {
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from('documents')
-    .select('status, status_history')
+    .select('status, status_history, error_reason')
     .eq('id', documentId)
     .single();
 
@@ -115,7 +119,12 @@ async function checkForExternalFailure(
 
   const status = readStatus(documentId, data.status);
   if (status === 'needs_manual_entry') {
-    return { failed: true, status, history: data.status_history };
+    return {
+      failed: true,
+      status,
+      history: data.status_history,
+      errorReason: data.error_reason,
+    };
   }
   return { failed: false };
 }
@@ -212,7 +221,18 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
       await advance('extracting_text', 'Extracting text from PDF');
 
       const pdfStart = Date.now();
-      const pdfResult = await extractPdfText(buffer);
+      let pdfResult;
+      try {
+        pdfResult = await extractPdfText(buffer);
+      } catch (pdfError) {
+        // A file that isn't a readable PDF at all (truncated, corrupt, or
+        // mislabelled) fails here rather than returning poor-quality text, so
+        // it never reaches the OCR fallback — record it as its own failed step.
+        const detail = pdfError instanceof Error ? pdfError.message : 'unknown error';
+        await logStep(documentId, 'pdf_extraction', 'failed', Date.now() - pdfStart, detail);
+        await advance('needs_manual_entry', `Failed to read PDF: ${detail}`);
+        return { id: documentId, status: 'needs_manual_entry' };
+      }
       await logStep(
         documentId,
         'pdf_extraction',
@@ -229,6 +249,24 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
 
         const ocrStart = Date.now();
         const ocrResult = await extractTextFromPdfWithRetry(documentId, buffer);
+
+        // Checked before the step is logged: the retry wrapper resolves an
+        // exhausted OCR run normally (having already written the failure
+        // itself), so the DB row — not the returned value — is what says
+        // whether this step actually succeeded.
+        const failureCheck = await checkForExternalFailure(documentId);
+        if (failureCheck.failed) {
+          await logStep(
+            documentId,
+            'ocr',
+            'failed',
+            Date.now() - ocrStart,
+            failureCheck.errorReason ?? undefined
+          );
+          currentStatus = failureCheck.status;
+          history = failureCheck.history;
+          return { id: documentId, status: 'needs_manual_entry' };
+        }
         await logStep(
           documentId,
           'ocr',
@@ -236,13 +274,6 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
           Date.now() - ocrStart,
           `wordCount=${ocrResult.wordCount}`
         );
-
-        const failureCheck = await checkForExternalFailure(documentId);
-        if (failureCheck.failed) {
-          currentStatus = failureCheck.status;
-          history = failureCheck.history;
-          return { id: documentId, status: 'needs_manual_entry' };
-        }
         rawText = ocrResult.text;
         ocrQualityScore = ocrResult.ocrQualityScore;
       } else {
@@ -254,6 +285,22 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
 
       const ocrStart = Date.now();
       const ocrResult = await extractTextFromImageWithRetry(documentId, buffer);
+
+      // Same ordering as the scanned-PDF branch above, and for the same
+      // reason: the DB row is the authority on whether OCR succeeded.
+      const failureCheck = await checkForExternalFailure(documentId);
+      if (failureCheck.failed) {
+        await logStep(
+          documentId,
+          'ocr',
+          'failed',
+          Date.now() - ocrStart,
+          failureCheck.errorReason ?? undefined
+        );
+        currentStatus = failureCheck.status;
+        history = failureCheck.history;
+        return { id: documentId, status: 'needs_manual_entry' };
+      }
       await logStep(
         documentId,
         'ocr',
@@ -261,13 +308,6 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
         Date.now() - ocrStart,
         `wordCount=${ocrResult.wordCount}`
       );
-
-      const failureCheck = await checkForExternalFailure(documentId);
-      if (failureCheck.failed) {
-        currentStatus = failureCheck.status;
-        history = failureCheck.history;
-        return { id: documentId, status: 'needs_manual_entry' };
-      }
       rawText = ocrResult.text;
       ocrQualityScore = ocrResult.ocrQualityScore;
     }
@@ -386,7 +426,20 @@ export async function processDocument(documentId: string): Promise<ProcessDocume
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error during processing';
     try {
-      await advance('needs_manual_entry', message);
+      // A helper may already have failed the document with a more specific
+      // reason (Phase 11's retry exhaustion writes one before returning);
+      // whatever went wrong afterwards must not overwrite it.
+      const alreadyFailed = await checkForExternalFailure(documentId);
+      if (alreadyFailed.failed) {
+        currentStatus = alreadyFailed.status;
+        history = alreadyFailed.history;
+        console.error(
+          `Document ${documentId} was already failed (${alreadyFailed.errorReason ?? 'no reason recorded'}); not overwriting with:`,
+          message
+        );
+      } else {
+        await advance('needs_manual_entry', message);
+      }
     } catch (transitionError) {
       console.error(`Failed to record failure for document ${documentId}:`, transitionError);
     }
