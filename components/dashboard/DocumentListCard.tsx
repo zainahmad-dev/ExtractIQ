@@ -44,9 +44,13 @@ export function DocumentListCard({ title, items, emptyMessage }: DocumentListCar
               className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
             >
               <div className="min-w-0">
+                {/* One line of text is a 20px tap target inside a taller row.
+                    The padding (with a matching negative margin, so the row
+                    keeps its height) covers the row on touch widths; from md
+                    up the link box is unchanged. */}
                 <Link
                   href={detailHref(item)}
-                  className="block truncate text-sm font-medium hover:text-primary"
+                  className="block truncate py-3 text-sm font-medium hover:text-primary -my-3 md:my-0 md:py-0"
                 >
                   {item.filename}
                 </Link>

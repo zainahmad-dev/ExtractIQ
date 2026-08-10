@@ -47,7 +47,13 @@ export default function ReviewPage({ params }: ReviewPageProps) {
   }, [id]);
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col gap-4 p-6">
+    /* The only viewport-height screen in the app, so it's the only one that has
+       to account for the mobile chrome by hand: 3.5rem of TopBar always, plus
+       the 4rem of padding app/layout.tsx adds below md to clear the fixed
+       BottomNav. Subtracting only the TopBar (as this did) pushed the last
+       4rem of the panes under that nav and left the page itself scrolling
+       behind two already-scrolling panes. */
+    <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-4 p-6 md:h-[calc(100vh-3.5rem)]">
       <h1 className="text-2xl font-semibold">Review</h1>
 
       {loadError && (
